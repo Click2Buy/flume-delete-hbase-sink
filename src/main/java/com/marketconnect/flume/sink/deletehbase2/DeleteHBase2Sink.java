@@ -76,6 +76,7 @@ import java.util.NavigableMap;
 public class DeleteHBase2Sink extends AbstractSink implements Configurable, BatchSizeSupported {
 
   private String tableName;
+  private byte[] columnFamily;
   private Connection conn;
   private BufferedMutator table;
   private long batchSize;
@@ -134,6 +135,30 @@ public class DeleteHBase2Sink extends AbstractSink implements Configurable, Batc
       throw new FlumeException("Could not load table, " + tableName +
           " from HBase", e);
     }
+    try {
+      if (!privilegedExecutor.execute((PrivilegedExceptionAction<Boolean>) () -> {
+        Table t = null;
+        try {
+          t = conn.getTable(TableName.valueOf(tableName));
+          return t.getTableDescriptor().hasFamily(columnFamily);
+        } finally {
+          if (t != null) {
+            t.close();
+          }
+        }
+      })) {
+        throw new IOException("Table " + tableName
+            + " has no such column family " + Bytes.toString(columnFamily));
+      }
+    } catch (Exception e) {
+      //Get getTableDescriptor also throws IOException, so catch the IOException
+      //thrown above or by the getTableDescriptor() call.
+      sinkCounter.incrementConnectionFailedCount();
+      throw new FlumeException("Error getting column family from HBase."
+          + "Please verify that the table " + tableName + " and Column Family, "
+          + Bytes.toString(columnFamily) + " exists in HBase, and the"
+          + " current user has permissions to access that table.", e);
+    }
 
     super.start();
     sinkCounter.incrementConnectionCreatedCount();
@@ -171,12 +196,17 @@ public class DeleteHBase2Sink extends AbstractSink implements Configurable, Batc
     }
 
     tableName = context.getString(HBase2SinkConfigurationConstants.CONFIG_TABLE);
+    String cf = context.getString(
+        HBase2SinkConfigurationConstants.CONFIG_COLUMN_FAMILY);
     batchSize = context.getLong(
         HBase2SinkConfigurationConstants.CONFIG_BATCHSIZE, 100L);
     Context serializerContext = new Context();
     //If not specified, will use HBase defaults.
     Preconditions.checkNotNull(tableName,
         "Table name cannot be empty, please specify in configuration file");
+    Preconditions.checkNotNull(cf,
+        "Column family cannot be empty, please specify in configuration file");
+    columnFamily = cf.getBytes(Charsets.UTF_8);
     kerberosKeytab = context.getString(HBase2SinkConfigurationConstants.CONFIG_KEYTAB);
     kerberosPrincipal = context.getString(HBase2SinkConfigurationConstants.CONFIG_PRINCIPAL);
 
@@ -272,6 +302,7 @@ public class DeleteHBase2Sink extends AbstractSink implements Configurable, Batc
         } else {
           byte[] rowKey = event.getBody();
           Delete delete = new Delete(rowKey);
+          delete.addFamily(columnFamily);
           actions.add(delete);
         }
       }
